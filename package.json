@@ -1,0 +1,12 @@
+{
+  "name": "cs2-poller",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "poller.js",
+  "scripts": {
+    "start": "node poller.js"
+  },
+  "dependencies": {
+    "pg": "^8.13.1"
+  }
+}
