@@ -48,12 +48,12 @@ function computeDevigOdds(oddsJson) {
     if (book.suspended || !book.markets) continue;
     const ml = book.markets[MONEYLINE_MARKET];
     if (!ml || !ml.marketActive || !ml.outcomes) continue;
-    const o172 = ml.outcomes['172'];
-    const o171 = ml.outcomes['171'];
-    const pA = o172?.players?.['0']?.price;
-    const pB = o171?.players?.['0']?.price;
-    const aActive = o172?.players?.['0']?.active;
-    const bActive = o171?.players?.['0']?.active;
+    const oA = ml.outcomes['171'];
+    const oB = ml.outcomes['172'];
+    const pA = oA?.players?.['0']?.price;
+    const pB = oB?.players?.['0']?.price;
+    const aActive = oA?.players?.['0']?.active;
+    const bActive = oB?.players?.['0']?.active;
     if (aActive && pA > 1) pricesA.push(pA);
     if (bActive && pB > 1) pricesB.push(pB);
   }
@@ -91,8 +91,8 @@ async function upsertMatch(client, fx, odds) {
        (fixture_id, tournament_id, team_a, team_b, odds_a, odds_b, start_time, true_start, status, has_odds, updated_at)
      values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10, now())
      on conflict (fixture_id) do update set
-       odds_a     = coalesce(excluded.odds_a, matches.odds_a),
-       odds_b     = coalesce(excluded.odds_b, matches.odds_b),
+       odds_a     = excluded.odds_a,
+       odds_b     = excluded.odds_b,
        status     = excluded.status,
        true_start = excluded.true_start,
        has_odds   = excluded.has_odds,
