@@ -4,6 +4,7 @@ const { Pool } = pg;
 const ODDS_API_KEY = process.env.ODDS_API_KEY;
 const DATABASE_URL = process.env.DATABASE_URL;
 const SPORT_ID = 17;
+const MONEYLINE_MARKET = '171';
 
 const pool = new Pool({ connectionString: DATABASE_URL });
 
@@ -26,8 +27,46 @@ async function fetchFixtures() {
   const { from, to } = dateRange();
   const url = `https://api.oddspapi.io/v4/fixtures?apiKey=${ODDS_API_KEY}&sportId=${SPORT_ID}&from=${from}&to=${to}`;
   const res = await fetch(url);
-  if (!res.ok) throw new Error(`OddsPapi fixtures failed: ${res.status}`);
+  if (!res.ok) throw new Error(`fixtures failed: ${res.status}`);
   return res.json();
+}
+
+async function fetchOdds(fixtureId) {
+  const url = `https://api.oddspapi.io/v4/odds?apiKey=${ODDS_API_KEY}&fixtureId=${fixtureId}`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`odds failed: ${res.status}`);
+  return res.json();
+}
+
+function computeDevigOdds(oddsJson) {
+  const books = oddsJson.bookmakerOdds;
+  if (!books) return null;
+  const pricesA = [];
+  const pricesB = [];
+  for (const bookKey of Object.keys(books)) {
+    const book = books[bookKey];
+    if (book.suspended || !book.markets) continue;
+    const ml = book.markets[MONEYLINE_MARKET];
+    if (!ml || !ml.marketActive || !ml.outcomes) continue;
+    const o172 = ml.outcomes['172'];
+    const o171 = ml.outcomes['171'];
+    const pA = o172?.players?.['0']?.price;
+    const pB = o171?.players?.['0']?.price;
+    const aActive = o172?.players?.['0']?.active;
+    const bActive = o171?.players?.['0']?.active;
+    if (aActive && pA > 1) pricesA.push(pA);
+    if (bActive && pB > 1) pricesB.push(pB);
+  }
+  if (pricesA.length === 0 || pricesB.length === 0) return null;
+  const avg = (arr) => arr.reduce((s, x) => s + x, 0) / arr.length;
+  const avgA = avg(pricesA);
+  const avgB = avg(pricesB);
+  const impA = 1 / avgA;
+  const impB = 1 / avgB;
+  const total = impA + impB;
+  const oddsA = +(1 / (impA / total)).toFixed(2);
+  const oddsB = +(1 / (impB / total)).toFixed(2);
+  return { oddsA, oddsB };
 }
 
 async function upsertTournament(client, fx) {
@@ -44,20 +83,25 @@ async function approvedTournamentIds(client) {
   return new Set(rows.map((r) => String(r.id)));
 }
 
-async function upsertMatch(client, fx) {
+async function upsertMatch(client, fx, odds) {
   const status = mapStatus(fx.statusId);
   if (!status) return;
   await client.query(
     `insert into matches
-       (fixture_id, tournament_id, team_a, team_b, start_time, true_start, status, has_odds, updated_at)
-     values ($1, $2, $3, $4, $5, $6, $7, $8, now())
+       (fixture_id, tournament_id, team_a, team_b, odds_a, odds_b, start_time, true_start, status, has_odds, updated_at)
+     values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10, now())
      on conflict (fixture_id) do update set
+       odds_a     = coalesce(excluded.odds_a, matches.odds_a),
+       odds_b     = coalesce(excluded.odds_b, matches.odds_b),
        status     = excluded.status,
        true_start = excluded.true_start,
        has_odds   = excluded.has_odds,
        updated_at = now()`,
-    [fx.fixtureId, fx.tournamentId, fx.participant1Name, fx.participant2Name,
-     fx.startTime, fx.trueStartTime, status, fx.hasOdds]
+    [
+      fx.fixtureId, fx.tournamentId, fx.participant1Name, fx.participant2Name,
+      odds ? odds.oddsA : null, odds ? odds.oddsB : null,
+      fx.startTime, fx.trueStartTime, status, fx.hasOdds,
+    ]
   );
 }
 
@@ -71,14 +115,23 @@ async function run() {
       if (fx.tournamentId) await upsertTournament(client, fx);
     }
     const approved = await approvedTournamentIds(client);
-    let stored = 0;
+    let stored = 0, priced = 0;
     for (const fx of fixtures) {
-      if (approved.has(String(fx.tournamentId))) {
-        await upsertMatch(client, fx);
-        stored++;
+      if (!approved.has(String(fx.tournamentId))) continue;
+      let odds = null;
+      if (fx.hasOdds && mapStatus(fx.statusId) === 'upcoming') {
+        try {
+          const oddsJson = await fetchOdds(fx.fixtureId);
+          odds = computeDevigOdds(oddsJson);
+          if (odds) priced++;
+        } catch (e) {
+          console.error(`odds error ${fx.fixtureId}: ${e.message}`);
+        }
       }
+      await upsertMatch(client, fx, odds);
+      stored++;
     }
-    console.log(`Stored ${stored} matches from ${approved.size} approved tournaments`);
+    console.log(`Stored ${stored} matches, ${priced} with odds`);
   } catch (err) {
     console.error('Poll error:', err.message);
   } finally {
